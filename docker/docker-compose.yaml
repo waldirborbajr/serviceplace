@@ -10,10 +10,10 @@ services:
     container_name: platform_php
     restart: unless-stopped
     volumes:
-      # Código fonte montado como volume — edita localmente, reflete no container
+      # Código fonte montado como volume — edita localmente, reflete no container.
+      # NÃO montar nada em /var/www/html (sombrearia o bind mount).
+      # O SQLite vive em ./data/platform.db, já criado e com dono correto no host.
       - ../:/var/www/html:delegated
-      # Persiste o banco SQLite fora do container
-      - sqlite_data:/var/www/html
     environment:
       JWT_SECRET: "${JWT_SECRET:-dev-secret-troque-em-producao}"
     networks:
@@ -39,7 +39,8 @@ services:
   # ---------------------------------------------------------------------------
   # MySQL (opcional — comente se usar só SQLite)
   # Descomente quando quiser testar a troca de banco.
-  # Troque DB_DSN no api.php para 'mysql:host=mysql;dbname=platform;charset=utf8mb4'
+  # Troque DB_DSN no index.php para
+  # 'mysql:host=mysql;dbname=platform;charset=utf8mb4'
   # ---------------------------------------------------------------------------
   # mysql:
   #   image: mysql:8.4           # 8.4 LTS — suporte até 2032
@@ -61,6 +62,5 @@ networks:
   platform:
     driver: bridge
 
-volumes:
-  sqlite_data:
-  # mysql_data:    # descomente junto com o serviço mysql acima
+# volumes:                        # nada declarado por enquanto.
+#   mysql_data:                   # descomente junto com o serviço mysql acima.

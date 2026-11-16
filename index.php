@@ -12,15 +12,15 @@ define('JWT_EXPIRY', 3600 * 24); // 24h
 // Abstração de banco: troque DB_DRIVER para 'mysql' e ajuste DB_DSN
 // para migrar sem mexer no resto do código.
 define('DB_DRIVER', 'sqlite');
-define('DB_DSN',    'sqlite:' . __DIR__ . '/platform.db');
+define('DB_DSN',    'sqlite:' . __DIR__ . '/data/platform.db');
 define('DB_USER',   null);
 define('DB_PASS',   null);
 
 // Para MySQL seria:
 // define('DB_DRIVER', 'mysql');
-// define('DB_DSN',    'mysql:host=localhost;dbname=platform;charset=utf8mb4');
-// define('DB_USER',   'root');
-// define('DB_PASS',   'senha');
+// define('DB_DSN',    'mysql:host=mysql;dbname=platform;charset=utf8mb4');
+// define('DB_USER',   'platform');
+// define('DB_PASS',   'platform');
 
 // =============================================================================
 // CAMADA DE BANCO DE DADOS
