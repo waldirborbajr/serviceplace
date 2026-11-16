@@ -15,6 +15,8 @@
 #   make health-all # testa o login de todos os usuários do seed
 #   make seed       # força o seed (dispara um request)
 #   make token      # imprime o JWT do contratante
+#   make pay-test   # smoke test do fluxo de pagamento (listar, done, release)
+#   make reset-rate # limpa o rate limit de /auth/login (útil após vários health)
 #   make env-check  # mostra se o .env da raiz foi carregado
 #
 # Segredos: o .env na raiz é lido automaticamente (via --env-file).
@@ -34,7 +36,7 @@ SEED_PASS  := 123
 # Usuários criados pelo seed de dev (index.php -> seed_dev_data()).
 SEED_USERS := cliente@test.com fotografo@test.com garcom@test.com dj@test.com
 
-.PHONY: up upd down logs ps restart setup reset-db rehealth sh health health-all seed token help env-check
+.PHONY: up upd down logs ps restart setup reset-db rehealth sh health health-all seed token pay-test reset-rate help env-check
 
 help:
 	@echo "Alvos disponíveis:"
@@ -52,6 +54,8 @@ help:
 	@echo "  make health-all  Testa login de todos os usuários do seed"
 	@echo "  make seed        Dispara um request para rodar migrations + seed"
 	@echo "  make token       Imprime o JWT do contratante"
+	@echo "  make pay-test    Smoke test do fluxo de pagamento"
+	@echo "  make reset-rate  Limpa o rate limit de /auth/login"
 	@echo "  make env-check   Mostra se o .env da raiz foi carregado"
 	@echo ""
 	@echo "Usuário de teste (contratante): $(SEED_EMAIL) / $(SEED_PASS)"
@@ -134,4 +138,49 @@ token:
 	@curl -sS $(API)/auth/login \
 		-H "Content-Type: application/json" \
 		-d '{"email":"$(SEED_EMAIL)","password":"$(SEED_PASS)"}' \
-		| sed -n 's/.*"token":"\([^"]*\)".*/\1/p'
+		| grep -o '"token":"[^"]*"' | cut -d'"' -f4
+
+# Limpa o rate limit de /auth/login. Útil quando você rodou health/health-all
+# muitas vezes e o servidor passou a retornar 429.
+reset-rate:
+	@if [ ! -f "$(ROOT)/data/platform.db" ]; then \
+		echo "reset-rate: data/platform.db não existe (rode make setup e make seed antes)"; \
+		exit 1; \
+	fi; \
+	sudo sqlite3 $(ROOT)/data/platform.db "DELETE FROM rate_limits WHERE endpoint = '/auth/login';"; \
+	echo "rate limit de /auth/login limpo"
+
+# Smoke test do fluxo de pagamento.
+pay-test:
+	@TOKEN=$$(curl -sS $(API)/auth/login \
+		-H "Content-Type: application/json" \
+		-d '{"email":"$(SEED_EMAIL)","password":"$(SEED_PASS)"}' \
+		| grep -o '"token":"[^"]*"' | cut -d'"' -f4); \
+	if [ -z "$$TOKEN" ]; then \
+		echo "pay-test: falha no login do contratante"; \
+		echo "Diagnóstico:"; \
+		echo "  - make health (deve retornar HTTP 200)"; \
+		echo "  - make reset-rate (se o rate limit estourou)"; \
+		echo "  - make ps (containers rodando?)"; \
+		echo "Resposta do servidor:"; \
+		curl -sS $(API)/auth/login \
+			-H "Content-Type: application/json" \
+			-d '{"email":"$(SEED_EMAIL)","password":"$(SEED_PASS)"}'; \
+		echo; \
+		exit 1; \
+	fi; \
+	echo "== Pagamentos do evento 1 =="; \
+	curl -sS $(API)/events/1/payments -H "Authorization: Bearer $$TOKEN"; \
+	echo; \
+	echo "== Marcando vínculo 1 (fotógrafo) como done =="; \
+	curl -sS -X PATCH $(API)/events/1/professionals/1 \
+		-H "Authorization: Bearer $$TOKEN" -H "Content-Type: application/json" \
+		-d '{"status":"done"}'; \
+	echo; \
+	echo "== Liberando pagamento 1 =="; \
+	curl -sS -X POST $(API)/payments/1/release \
+		-H "Authorization: Bearer $$TOKEN"; \
+	echo; \
+	echo "== Pagamentos do evento 1 (após release) =="; \
+	curl -sS $(API)/events/1/payments -H "Authorization: Bearer $$TOKEN"; \
+	echo
