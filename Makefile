@@ -9,11 +9,13 @@
 #   make ps         # status dos containers
 #   make restart    # down + up
 #   make reset-db   # apaga o SQLite; migrations + seed rodam no próximo request
-#   make rehealth   # reset-db + seed + health (útil após mudar o seed)
+#   make rehealth   # reset-db + seed + health
 #   make sh         # shell dentro do container php
-#   make health     # testa o login do usuário de teste (espera 200)
+#   make health     # testa o login do contratante (espera 200)
+#   make health-all # testa o login de todos os usuários do seed
 #   make seed       # força o seed (dispara um request)
-#   make token      # imprime o JWT do usuário de teste
+#   make token      # imprime o JWT do contratante
+#   make env-check  # mostra se o .env da raiz foi carregado
 #
 # Segredos: o .env na raiz é lido automaticamente (via --env-file).
 #   JWT_SECRET=...
@@ -21,39 +23,40 @@
 #   (opcional) MYSQL_ROOT_PASSWORD=...
 #   (opcional) MYSQL_PASSWORD=...
 
-# Raiz do projeto = diretório deste Makefile, mesmo que `make -C` seja usado.
 ROOT := $(CURDIR)
 
-# Compose sempre lê o .env da raiz.
 COMPOSE := docker compose -f $(ROOT)/docker/docker-compose.yaml --env-file $(ROOT)/.env
 
 API        := http://localhost:8080
-SEED_EMAIL := teste@test.com
+SEED_EMAIL := cliente@test.com
 SEED_PASS  := 123
 
-.PHONY: up upd down logs ps restart setup reset-db rehealth sh health seed token help env-check
+# Usuários criados pelo seed de dev (index.php -> seed_dev_data()).
+SEED_USERS := cliente@test.com fotografo@test.com garcom@test.com dj@test.com
+
+.PHONY: up upd down logs ps restart setup reset-db rehealth sh health health-all seed token help env-check
 
 help:
 	@echo "Alvos disponíveis:"
-	@echo "  make setup      Cria data/ e ajusta permissões (rodar uma vez)"
-	@echo "  make up         Sobe containers em foreground (com --build)"
-	@echo "  make upd        Sobe containers em background (com --build)"
-	@echo "  make down       Para e remove containers"
-	@echo "  make logs       Acompanha logs"
-	@echo "  make ps         Status dos containers"
-	@echo "  make restart    down + up (foreground)"
-	@echo "  make reset-db   Apaga data/platform.db"
-	@echo "  make rehealth   reset-db + seed + health"
-	@echo "  make sh         Shell no container php"
-	@echo "  make health     Testa login do usuário de teste (espera 200)"
-	@echo "  make seed       Dispara um request para rodar migrations + seed"
-	@echo "  make token      Imprime o JWT do usuário de teste"
-	@echo "  make env-check  Mostra se o .env da raiz foi carregado"
+	@echo "  make setup       Cria data/ e ajusta permissões (rodar uma vez)"
+	@echo "  make up          Sobe containers em foreground (com --build)"
+	@echo "  make upd         Sobe containers em background (com --build)"
+	@echo "  make down        Para e remove containers"
+	@echo "  make logs        Acompanha logs"
+	@echo "  make ps          Status dos containers"
+	@echo "  make restart     down + up (foreground)"
+	@echo "  make reset-db    Apaga data/platform.db"
+	@echo "  make rehealth    reset-db + seed + health"
+	@echo "  make sh          Shell no container php"
+	@echo "  make health      Testa login do contratante ($(SEED_EMAIL))"
+	@echo "  make health-all  Testa login de todos os usuários do seed"
+	@echo "  make seed        Dispara um request para rodar migrations + seed"
+	@echo "  make token       Imprime o JWT do contratante"
+	@echo "  make env-check   Mostra se o .env da raiz foi carregado"
 	@echo ""
-	@echo "Usuário de teste (seed automático): $(SEED_EMAIL) / $(SEED_PASS)"
+	@echo "Usuário de teste (contratante): $(SEED_EMAIL) / $(SEED_PASS)"
+	@echo "Usuários do seed: $(SEED_USERS)"
 
-# Garante que o .env exista antes de qualquer alvo que use $(COMPOSE).
-# (Não falha se ausente — os fallbacks do compose entram em ação.)
 env-check:
 	@if [ -f "$(ROOT)/.env" ]; then \
 		echo "OK: $(ROOT)/.env encontrado"; \
@@ -93,19 +96,40 @@ rehealth: reset-db seed health
 sh: env-check
 	$(COMPOSE) exec php sh
 
-# Dispara um request qualquer para garantir que db_migrate() rodou.
 seed:
 	@curl -sS -o /dev/null -w "seed ok (HTTP %{http_code})\n" \
 		$(API)/providers
 
-# Smoke test: login do usuário de teste deve retornar 200.
+# Smoke test: login do contratante deve retornar 200.
 health:
 	@curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
 		$(API)/auth/login \
 		-H "Content-Type: application/json" \
 		-d '{"email":"$(SEED_EMAIL)","password":"$(SEED_PASS)"}'
 
-# Imprime o JWT (útil para testar /me).
+# Testa login de todos os usuários do seed. Falha (exit 1) se algum não retornar 200.
+health-all:
+	@fail=0; \
+	for email in $(SEED_USERS); do \
+		code=$$(curl -sS -o /dev/null -w "%{http_code}" \
+			$(API)/auth/login \
+			-H "Content-Type: application/json" \
+			-d "{\"email\":\"$$email\",\"password\":\"$(SEED_PASS)\"}"); \
+		if [ "$$code" = "200" ]; then \
+			printf "  %-24s HTTP %s\n" "$$email" "$$code"; \
+		else \
+			printf "  %-24s HTTP %s  <-- FALHOU\n" "$$email" "$$code"; \
+			fail=1; \
+		fi; \
+	done; \
+	if [ $$fail -ne 0 ]; then \
+		echo "health-all: pelo menos um usuário falhou"; \
+		exit 1; \
+	else \
+		echo "health-all: todos OK"; \
+	fi
+
+# Imprime o JWT do contratante (útil para testar /me, /events, etc).
 token:
 	@curl -sS $(API)/auth/login \
 		-H "Content-Type: application/json" \
