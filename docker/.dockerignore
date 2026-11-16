@@ -1,0 +1,8 @@
+.git
+.env
+*.db
+*.sqlite
+*.log
+docker/
+node_modules/
+vendor/
