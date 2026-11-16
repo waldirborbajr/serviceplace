@@ -67,7 +67,7 @@ function db_last_id(): string {
 }
 
 // =============================================================================
-// MIGRATIONS (schema do banco)
+// MIGRATIONS (schema do banco + seed de dev)
 // Rodadas uma vez na primeira requisição se as tabelas não existirem.
 // =============================================================================
 
@@ -108,6 +108,30 @@ function db_migrate(): void {
         created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
         updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
     )");
+
+    // -------------------------------------------------------------------------
+    // SEED DE DEV (idempotente) — NÃO usar em produção
+    // Usuário de teste: teste@test.com / 123 (role: client)
+    // -------------------------------------------------------------------------
+    $seedEmail = 'teste@test.com';
+    if (!db_fetch('SELECT id FROM users WHERE email = ?', [$seedEmail])) {
+        db_run(
+            'INSERT INTO users (name, email, phone, password, role) VALUES (?, ?, ?, ?, ?)',
+            [
+                'Usuário Teste',
+                $seedEmail,
+                null,
+                password_hash('123', PASSWORD_BCRYPT),
+                'client',
+            ]
+        );
+        $seedId = (int) db_last_id();
+
+        db_run(
+            'INSERT INTO client_profiles (user_id, city, neighborhood) VALUES (?, ?, ?)',
+            [$seedId, 'São Paulo', 'Centro']
+        );
+    }
 }
 
 // =============================================================================
