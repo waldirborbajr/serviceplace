@@ -16,6 +16,7 @@ services:
       - ../:/var/www/html:delegated
     environment:
       JWT_SECRET: "${JWT_SECRET:-dev-secret-troque-em-producao}"
+      PASSWORD_PEPPER: "${PASSWORD_PEPPER:-dev-pepper-troque-em-producao}"
     networks:
       - platform
 
@@ -41,6 +42,7 @@ services:
   # Descomente quando quiser testar a troca de banco.
   # Troque DB_DSN no index.php para
   # 'mysql:host=mysql;dbname=platform;charset=utf8mb4'
+  # e DB_USER/DB_PASS para platform/platform.
   # ---------------------------------------------------------------------------
   # mysql:
   #   image: mysql:8.4           # 8.4 LTS — suporte até 2032
@@ -55,6 +57,11 @@ services:
   #     - "3306:3306"
   #   volumes:
   #     - mysql_data:/var/lib/mysql
+  #   healthcheck:
+  #     test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p$$MYSQL_ROOT_PASSWORD"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
   #   networks:
   #     - platform
 
@@ -62,5 +69,5 @@ networks:
   platform:
     driver: bridge
 
-# volumes:                        # nada declarado por enquanto.
-#   mysql_data:                   # descomente junto com o serviço mysql acima.
+# volumes:
+#   mysql_data:                  # descomente junto com o serviço mysql acima.

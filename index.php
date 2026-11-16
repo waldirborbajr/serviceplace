@@ -6,11 +6,15 @@ declare(strict_types=1);
 // CONFIGURAÇÃO
 // =============================================================================
 
-define('JWT_SECRET', getenv('JWT_SECRET') ?: 'troque-este-segredo-em-producao');
-define('JWT_EXPIRY', 3600 * 24); // 24h
+define('JWT_SECRET', getenv('JWT_SECRET') ?: 'dev-secret-troque-em-producao');
+define('JWT_EXPIRY', 3600); // 1h (reduzido de 24h por segurança)
+define('PASSWORD_PEPPER', getenv('PASSWORD_PEPPER') ?: 'dev-pepper-troque-em-producao');
+
+// Rate limiting: defaults por endpoint
+define('RATE_LIMIT_DEFAULT_MAX', 60);   // 60 req
+define('RATE_LIMIT_DEFAULT_WINDOW', 60); // por 60s
 
 // Abstração de banco: troque DB_DRIVER para 'mysql' e ajuste DB_DSN
-// para migrar sem mexer no resto do código.
 define('DB_DRIVER', 'sqlite');
 define('DB_DSN',    'sqlite:' . __DIR__ . '/data/platform.db');
 define('DB_USER',   null);
@@ -24,8 +28,6 @@ define('DB_PASS',   null);
 
 // =============================================================================
 // CAMADA DE BANCO DE DADOS
-// Toda interação com banco passa por estas funções.
-// Para trocar de driver: mude as constantes acima. Nada mais.
 // =============================================================================
 
 function db_connect(): PDO {
@@ -40,7 +42,6 @@ function db_connect(): PDO {
 
     $pdo = new PDO(DB_DSN, DB_USER, DB_PASS, $options);
 
-    // SQLite: habilita foreign keys (desabilitado por padrão no SQLite)
     if (DB_DRIVER === 'sqlite') {
         $pdo->exec('PRAGMA foreign_keys = ON');
     }
@@ -67,12 +68,48 @@ function db_last_id(): string {
 }
 
 // =============================================================================
-// MIGRATIONS (schema do banco + seed de dev)
-// Rodadas uma vez na primeira requisição se as tabelas não existirem.
+// SENHAS — salt & pepper
+// =============================================================================
+
+// OWASP: pré-hash com HMAC-SHA384 usando pepper, depois bcrypt (que gera salt).
+function hash_password(string $plain): string {
+    $peppered = hash_hmac('sha384', $plain, PASSWORD_PEPPER, true);
+    return password_hash($peppered, PASSWORD_BCRYPT);
+}
+
+function verify_password(string $plain, string $stored): bool {
+    $peppered = hash_hmac('sha384', $plain, PASSWORD_PEPPER, true);
+    return password_verify($peppered, $stored);
+}
+
+// =============================================================================
+// VALIDAÇÃO DE FORMATO
+// =============================================================================
+
+function validate_email(string $email): bool {
+    return filter_var($email, FILTER_VALIDATE_EMAIL) !== false;
+}
+
+function validate_phone(?string $phone): bool {
+    if ($phone === null || $phone === '') return true;
+    return preg_match('/^\+?[1-9]\d{1,14}$/', $phone) === 1;
+}
+
+function validate_role(string $role): bool {
+    return in_array($role, ['client', 'provider'], true);
+}
+
+function validate_str_len(?string $s, int $min, int $max): bool {
+    if ($s === null) return $min === 0;
+    $len = mb_strlen($s, 'UTF-8');
+    return $len >= $min && $len <= $max;
+}
+
+// =============================================================================
+// MIGRATIONS (schema + seed de dev)
 // =============================================================================
 
 function db_migrate(): void {
-    // Tabela unificada de usuários (clientes e fornecedores são o mesmo login)
     db_run("CREATE TABLE IF NOT EXISTS users (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         name        TEXT    NOT NULL,
@@ -84,7 +121,6 @@ function db_migrate(): void {
         updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
     )");
 
-    // Perfil extra para fornecedores
     db_run("CREATE TABLE IF NOT EXISTS provider_profiles (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id         INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
@@ -94,12 +130,11 @@ function db_migrate(): void {
         neighborhood    TEXT,
         lat             REAL,
         lng             REAL,
-        available       INTEGER NOT NULL DEFAULT 1,  -- 0/1 booleano
+        available       INTEGER NOT NULL DEFAULT 1,
         created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
         updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
     )");
 
-    // Perfil extra para clientes
     db_run("CREATE TABLE IF NOT EXISTS client_profiles (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id         INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
@@ -109,21 +144,24 @@ function db_migrate(): void {
         updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
     )");
 
+    // Rate limiting
+    db_run("CREATE TABLE IF NOT EXISTS rate_limits (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip           TEXT    NOT NULL,
+        endpoint     TEXT    NOT NULL,
+        attempts     INTEGER NOT NULL DEFAULT 0,
+        window_start TEXT    NOT NULL DEFAULT (datetime('now'))
+    )");
+    db_run("CREATE UNIQUE INDEX IF NOT EXISTS idx_rate_ip_endpoint ON rate_limits(ip, endpoint)");
+
     // -------------------------------------------------------------------------
     // SEED DE DEV (idempotente) — NÃO usar em produção
-    // Usuário de teste: teste@test.com / 123 (role: client)
     // -------------------------------------------------------------------------
     $seedEmail = 'teste@test.com';
     if (!db_fetch('SELECT id FROM users WHERE email = ?', [$seedEmail])) {
         db_run(
             'INSERT INTO users (name, email, phone, password, role) VALUES (?, ?, ?, ?, ?)',
-            [
-                'Usuário Teste',
-                $seedEmail,
-                null,
-                password_hash('123', PASSWORD_BCRYPT),
-                'client',
-            ]
+            ['Usuário Teste', $seedEmail, null, hash_password('123'), 'client']
         );
         $seedId = (int) db_last_id();
 
@@ -135,7 +173,42 @@ function db_migrate(): void {
 }
 
 // =============================================================================
-// JWT (implementação mínima — HS256, sem biblioteca externa)
+// RATE LIMITING
+// =============================================================================
+
+function rate_limit(string $endpoint, int $maxAttempts = RATE_LIMIT_DEFAULT_MAX, int $windowSeconds = RATE_LIMIT_DEFAULT_WINDOW): void {
+    $ip  = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $now = time();
+
+    $row = db_fetch(
+        'SELECT id, attempts, window_start FROM rate_limits WHERE ip = ? AND endpoint = ?',
+        [$ip, $endpoint]
+    );
+
+    if ($row) {
+        $elapsed = $now - strtotime($row['window_start']);
+        if ($elapsed > $windowSeconds) {
+            // Janela expirou: reseta
+            db_run(
+                'UPDATE rate_limits SET attempts = 1, window_start = ? WHERE id = ?',
+                [date('Y-m-d H:i:s', $now), $row['id']]
+            );
+        } elseif ((int) $row['attempts'] >= $maxAttempts) {
+            http_response(429, ['error' => 'Muitas requisições. Tente novamente mais tarde.']);
+            exit;
+        } else {
+            db_run('UPDATE rate_limits SET attempts = attempts + 1 WHERE id = ?', [$row['id']]);
+        }
+    } else {
+        db_run(
+            'INSERT INTO rate_limits (ip, endpoint, attempts, window_start) VALUES (?, ?, 1, ?)',
+            [$ip, $endpoint, date('Y-m-d H:i:s', $now)]
+        );
+    }
+}
+
+// =============================================================================
+// JWT (HS256, algoritmo fixo)
 // =============================================================================
 
 function jwt_encode(array $payload): string {
@@ -150,13 +223,20 @@ function jwt_decode(string $token): ?array {
     $parts = explode('.', $token);
     if (count($parts) !== 3) return null;
 
-    [$header, $body, $sig] = $parts;
-    $expected = base64url_encode(hash_hmac('sha256', "$header.$body", JWT_SECRET, true));
+    [$header64, $body64, $sig64] = $parts;
 
-    // Comparação timing-safe
-    if (!hash_equals($expected, $sig)) return null;
+    // 1. Algoritmo fixo: rejeita qualquer header que não declare HS256.
+    $header = json_decode(base64url_decode($header64), true);
+    if (!is_array($header) || ($header['alg'] ?? '') !== 'HS256') {
+        return null;
+    }
 
-    $payload = json_decode(base64url_decode($body), true);
+    // 2. Assinatura timing-safe.
+    $expected = base64url_encode(hash_hmac('sha256', "$header64.$body64", JWT_SECRET, true));
+    if (!hash_equals($expected, $sig64)) return null;
+
+    // 3. Expiração.
+    $payload = json_decode(base64url_decode($body64), true);
     if (!$payload || ($payload['exp'] ?? 0) < time()) return null;
 
     return $payload;
@@ -171,7 +251,7 @@ function base64url_decode(string $data): string {
 }
 
 // =============================================================================
-// AUTENTICAÇÃO — middleware
+// AUTENTICAÇÃO
 // =============================================================================
 
 function auth_required(): array {
@@ -181,8 +261,7 @@ function auth_required(): array {
         exit;
     }
 
-    $token   = substr($header, 7);
-    $payload = jwt_decode($token);
+    $payload = jwt_decode(substr($header, 7));
     if (!$payload) {
         http_response(401, ['error' => 'Token inválido ou expirado']);
         exit;
@@ -223,14 +302,13 @@ function require_fields(array $fields): array {
 }
 
 // =============================================================================
-// ROTEADOR MÍNIMO
+// ROTEADOR
 // =============================================================================
 
 function route(string $method, string $pattern, callable $handler): void {
     $uri    = strtok($_SERVER['REQUEST_URI'], '?');
     $method = strtoupper($method);
 
-    // Converte :param em grupos de captura
     $regex = preg_replace('/:([a-zA-Z_]+)/', '(?P<$1>[^/]+)', $pattern);
     $regex = "#^{$regex}$#";
 
@@ -247,11 +325,25 @@ function route(string $method, string $pattern, callable $handler): void {
 
 // POST /auth/register/client
 function handle_register_client(): void {
+    rate_limit('/auth/register', 10, 300); // 10 registros por 5 min por IP
+
     $body = require_fields(['name', 'email', 'password']);
 
     $email = strtolower(trim($body['email']));
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    if (!validate_email($email)) {
         http_response(422, ['error' => 'E-mail inválido']);
+        return;
+    }
+    if (!validate_str_len($body['name'], 1, 120)) {
+        http_response(422, ['error' => 'Nome deve ter entre 1 e 120 caracteres']);
+        return;
+    }
+    if (!validate_phone($body['phone'] ?? null)) {
+        http_response(422, ['error' => 'Telefone inválido (use formato E.164, ex: +5511999999999)']);
+        return;
+    }
+    if (!validate_str_len($body['password'], 6, 200)) {
+        http_response(422, ['error' => 'Senha deve ter entre 6 e 200 caracteres']);
         return;
     }
 
@@ -260,17 +352,19 @@ function handle_register_client(): void {
         return;
     }
 
-    $hash = password_hash($body['password'], PASSWORD_BCRYPT);
-
     db_run(
         'INSERT INTO users (name, email, phone, password, role) VALUES (?, ?, ?, ?, ?)',
-        [trim($body['name']), $email, $body['phone'] ?? null, $hash, 'client']
+        [trim($body['name']), $email, $body['phone'] ?? null, hash_password($body['password']), 'client']
     );
     $user_id = (int) db_last_id();
 
     db_run(
         'INSERT INTO client_profiles (user_id, city, neighborhood) VALUES (?, ?, ?)',
-        [$user_id, $body['city'] ?? null, $body['neighborhood'] ?? null]
+        [
+            $user_id,
+            isset($body['city']) ? trim($body['city']) : null,
+            isset($body['neighborhood']) ? trim($body['neighborhood']) : null,
+        ]
     );
 
     $user = db_fetch('SELECT id, name, email, role, created_at FROM users WHERE id = ?', [$user_id]);
@@ -279,11 +373,33 @@ function handle_register_client(): void {
 
 // POST /auth/register/provider
 function handle_register_provider(): void {
+    rate_limit('/auth/register', 10, 300);
+
     $body = require_fields(['name', 'email', 'password', 'category', 'city']);
 
     $email = strtolower(trim($body['email']));
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    if (!validate_email($email)) {
         http_response(422, ['error' => 'E-mail inválido']);
+        return;
+    }
+    if (!validate_str_len($body['name'], 1, 120)) {
+        http_response(422, ['error' => 'Nome deve ter entre 1 e 120 caracteres']);
+        return;
+    }
+    if (!validate_phone($body['phone'] ?? null)) {
+        http_response(422, ['error' => 'Telefone inválido (use formato E.164, ex: +5511999999999)']);
+        return;
+    }
+    if (!validate_str_len($body['password'], 6, 200)) {
+        http_response(422, ['error' => 'Senha deve ter entre 6 e 200 caracteres']);
+        return;
+    }
+    if (!validate_str_len($body['category'], 1, 80)) {
+        http_response(422, ['error' => 'Categoria deve ter entre 1 e 80 caracteres']);
+        return;
+    }
+    if (!validate_str_len($body['city'], 1, 100)) {
+        http_response(422, ['error' => 'Cidade deve ter entre 1 e 100 caracteres']);
         return;
     }
 
@@ -292,11 +408,9 @@ function handle_register_provider(): void {
         return;
     }
 
-    $hash = password_hash($body['password'], PASSWORD_BCRYPT);
-
     db_run(
         'INSERT INTO users (name, email, phone, password, role) VALUES (?, ?, ?, ?, ?)',
-        [trim($body['name']), $email, $body['phone'] ?? null, $hash, 'provider']
+        [trim($body['name']), $email, $body['phone'] ?? null, hash_password($body['password']), 'provider']
     );
     $user_id = (int) db_last_id();
 
@@ -320,12 +434,19 @@ function handle_register_provider(): void {
 
 // POST /auth/login
 function handle_login(): void {
+    rate_limit('/auth/login', 5, 300); // 5 tentativas por 5 min por IP
+
     $body  = require_fields(['email', 'password']);
     $email = strtolower(trim($body['email']));
 
+    if (!validate_email($email)) {
+        http_response(422, ['error' => 'E-mail inválido']);
+        return;
+    }
+
     $user = db_fetch('SELECT * FROM users WHERE email = ?', [$email]);
 
-    if (!$user || !password_verify($body['password'], $user['password'])) {
+    if (!$user || !verify_password($body['password'], $user['password'])) {
         http_response(401, ['error' => 'Credenciais inválidas']);
         return;
     }
@@ -347,13 +468,20 @@ function handle_login(): void {
     ]);
 }
 
-// GET /me  — retorna o usuário autenticado com seu perfil
+// GET /me
 function handle_me(): void {
+    rate_limit('/me', 60, 60);
+
     $auth = auth_required();
     $user = db_fetch(
         'SELECT id, name, email, phone, role, created_at FROM users WHERE id = ?',
         [$auth['sub']]
     );
+
+    if (!$user) {
+        http_response(404, ['error' => 'Usuário não encontrado']);
+        return;
+    }
 
     if ($user['role'] === 'provider') {
         $profile = db_fetch('SELECT * FROM provider_profiles WHERE user_id = ?', [$user['id']]);
@@ -364,12 +492,38 @@ function handle_me(): void {
     http_response(200, ['user' => $user, 'profile' => $profile]);
 }
 
-// GET /providers  — lista fornecedores (público, com filtros opcionais)
+// GET /providers
 function handle_list_providers(): void {
-    $city         = $_GET['city']     ?? null;
+    rate_limit('/providers', 60, 60);
+
+    $city         = $_GET['city'] ?? null;
     $neighborhood = $_GET['neighborhood'] ?? null;
     $category     = $_GET['category'] ?? null;
     $available    = $_GET['available'] ?? null;
+
+    // Validação de comprimento dos filtros
+    foreach ([
+        'city'         => [$city, 100],
+        'neighborhood' => [$neighborhood, 100],
+        'category'     => [$category, 80],
+    ] as $name => [$value, $max]) {
+        if ($value !== null && !validate_str_len($value, 1, $max)) {
+            http_response(422, ['error' => "Filtro '$name' inválido (máx $max caracteres)"]);
+            return;
+        }
+    }
+
+    // available deve ser 0 ou 1
+    if ($available !== null) {
+        $validated = filter_var($available, FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => 0, 'max_range' => 1],
+        ]);
+        if ($validated === false) {
+            http_response(422, ['error' => "Filtro 'available' deve ser 0 ou 1"]);
+            return;
+        }
+        $available = $validated;
+    }
 
     $sql    = '
         SELECT u.id, u.name, u.phone,
@@ -395,7 +549,7 @@ function handle_list_providers(): void {
     }
     if ($available !== null) {
         $sql .= ' AND p.available = ?';
-        $params[] = (int) $available;
+        $params[] = $available;
     }
 
     $providers = db_fetch_all($sql, $params);
