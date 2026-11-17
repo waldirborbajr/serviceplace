@@ -7,12 +7,35 @@ API em PHP 8.5 (FPM) + Nginx, com SQLite. Roda em containers Docker.
 ```
 .
 ├── data/                 # SQLite (platform.db) — criado no setup, não versionado
-⢜── docker/
-�   ├── docker-compose.yaml
-�   z├── dockerfile
-�   z├── nginx.conf
-�   z└── php-dev.ini
-ⴜ── index.php            # front controller (roteador + API)
+├── docker/
+│   ├── docker-compose.yaml
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   └── php-dev.ini
+├── src/
+│   ├── Core/
+│   │   ├── Authorization.php
+│   │   ├── Configuration.php
+│   │   ├── Database.php
+│   │   ├── Http.php
+│   │   ├── Migrations.php
+│   │   ├── Security.php
+│   │   └── Validation.php
+│   ├── Routes/           # registro das rotas por domínio
+│   │   ├── auth.php
+│   │   ├── events.php
+│   │   ├── matchmaking.php
+│   │   ├── payments.php
+│   │   ├── provider-events.php
+│   │   └── providers.php
+│   ├── Services/         # handlers e regras de cada serviço
+│   │   ├── AuthService.php
+│   │   ├── EventService.php
+│   │   ├── MatchmakingService.php
+│   │   ├── PaymentService.php
+│   │   └── ProviderService.php
+│   └── bootstrap.php     # carrega módulos, migrations e rotas
+└── index.php             # front controller e fallback 404
 ```
 
 ## Pré-requisitos
@@ -20,58 +43,58 @@ API em PHP 8.5 (FPM) + Nginx, com SQLite. Roda em containers Docker.
 - Docker + Docker Compose (v2)
 - Linux/macOS com shell POSI
 
-## Setup inicial (uma vez só)
-O container roda o PHP-FPM como `www-data` (uid **82**). A pasta `data/` precisa
-ser gravável por esse uid, senão o SQLite falha com
-`attempt to write a readonly database`.
+## Setup inicial
 
-Na raiz do repositório:
+O Makefile cria `data/` e configura as permissões necessárias para o SQLite
+ser gravável pelo PHP-FPM (`www-data`, uid **82**). Na raiz do repositório,
+execute uma vez:
+
 ```sh
-mkdir -p data
-sudo chown -R 82:82 data
-chmod 700 data
+make setup
 ```
 
-Verifique:
-```sh
-ls -ld data
-# esperado: drwx------ ... 82 82 ... data
-```
-
-Se quiser inspecionar o banco pelo host depois, rode como root
-(`sudo sqlite3 data/platform.db`) ou ajuste as permissões (veja "Inspecionar o banco").
+Esse alvo usa `sudo` para ajustar o proprietário da pasta. Se as permissões
+forem alteradas posteriormente, rode `make setup` novamente.
 
 ## Rodar em desenvolvimento
-Na raiz do repositório:
+Após o setup, suba os containers:
 
 ```sh
-docker compose -f docker/docker-compose.yaml up --build
+make up
 ```
 
-- `--build` recompila a imagem PHP (necessário na primeira vez e após mudanças
-  no `Dockerfile` ou `php-dev.ini`)
-- sem `-d` os logs aparecem no terminal (recomendado em dev)
-- para rodar em background, adicione `-d` no final
+O alvo compila a imagem e mantém os logs no terminal. Outros comandos úteis:
 
-A API fica em **http://localhost:8080**.
-
-Para parar: `Ctrl+C` (ou `docker compose -f docker/docker-compose.yaml down`).
-
-### Alternativa com Makefile (opcional)
-
-Se preferir comandos curtos, crie um `Makefile` na raiz:
-
-```make
-COMPOSE := docker compose -f docker/docker-compose.yaml --project-directory docker
-
-up:      ; $(COMPOSE) up --build
-upd:     ; $(COMPOSE) up -d --build
-down:    ; $(COMPOSE) down
-logs:    ; $(COMPOSE) logs -f
-ps:      ; $(COMPOSE) ps
+```sh
+make upd       # sobe em background
+make logs      # acompanha os logs
+make ps        # mostra o status dos containers
+make down      # para e remove os containers
+make restart   # reinicia os containers
 ```
 
-Adé é só `make up`.
+A API fica em **http://localhost:8080**. Para recompilar após mudanças no
+`Dockerfile` ou em `php-dev.ini`, rode `make up` ou `make upd` novamente.
+
+### Outros alvos do Makefile
+
+O Makefile também oferece comandos para inicializar dados de desenvolvimento,
+validar a API e operar o banco:
+
+```sh
+make seed       # dispara migrations e seed (API deve estar rodando)
+make health     # testa o login do usuário de teste
+make health-all # testa o login de todos os usuários do seed
+make token      # imprime um JWT de teste
+make pay-test   # smoke test do fluxo de pagamento
+make reset-rate # limpa o rate limit do login
+make reset-db   # apaga o banco SQLite local
+make rehealth   # reseta o banco, roda seed e testa o login
+make help       # lista os alvos disponíveis
+```
+
+`make reset-db` apaga os dados locais. Depois, com a API em execução, use
+`make seed` para recriar o banco e os dados de desenvolvimento.
 
 ## Testar a API
 Registrar um cliente:
@@ -117,8 +140,8 @@ JWT_SECRET="$(openssl rand -hex 32)" \
 
 ## Trocar SQLite por MySQL
 O código já suporta os dois drivers. No `docker/docker-compose.yaml`,
-descomente o servi�o `mysql` (e o volume `mysql_data`). Depois edite
-`index.php`:
+descomente o servi�o `mysql` (e o volume `mysql_data`). Depois edite
+`src/Core/Configuration.php`:
 
 ```php
 define('DB_DRIVER', 'mysql');
@@ -146,14 +169,15 @@ sudo usermod -aG 82 "$USER"     # requer novo login/terminal
 sudo chmod 770 data
 ```
 
-## Resetar o banco
-Como as migrations rodam na primeira requisição, apagar o `.db` força
-recriação no próximo request:
+## Resetar o banco
+Para apagar o banco local, use o alvo do Makefile:
 
 ```sh
-sudo rm -f data/platform.db
-curl http://localhost:8080/providers     # dispara as migrations
+make reset-db
+make seed
 ```
+
+As migrations e o seed são executados na primeira requisição após o reset.
 
 ## Troubleshooting
 
@@ -171,16 +195,11 @@ Se estiver vazio, há um volume montado em cima de `/var/www/html` no
 `docker-compose.yaml` — remova-o. O bind mount `../:/var/www/html` é o único que deve existir.
 
 **`SQLSTATE[HY000] [14] unable to open database file`**
-A pasta `data/` não existe ou não é gravável pelo uid 82. Rode o setup inicial.
+A pasta `data/` não existe ou não é gravável pelo uid 82. Rode `make setup`.
 
 **`SQLSTATE[HY000]: General error: 8 attempt to write a readonly database`**
-Mesma causa: permissões em `data/`. O SQLite precisa criar `platform.db-journal`
-na mesma pasta, então **a pasta** precisa ser gravável, não só o arquivo:
-
-```sh
-sudo chown -R 82:82 data
-chmod 700 data
-```
+Mesma causa: permissões em `data/`. O SQLite precisa criar arquivos auxiliares
+na mesma pasta; rode `make setup` para ajustar as permissões.
 
 **`nginx: [emerg] location "/index.php" is outside location "\.php$"`**
 Config inválida: não se pode aninhar `location =` dentro de `location ~`

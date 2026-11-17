@@ -40,7 +40,7 @@ services:
   # ---------------------------------------------------------------------------
   # MySQL (opcional — comente se usar só SQLite)
   # Descomente quando quiser testar a troca de banco.
-  # Troque DB_DSN no index.php para
+  # Troque DB_DSN em src/Core/Configuration.php para
   # 'mysql:host=mysql;dbname=platform;charset=utf8mb4'
   # e DB_USER/DB_PASS para platform/platform.
   # ---------------------------------------------------------------------------

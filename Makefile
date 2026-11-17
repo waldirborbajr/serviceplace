@@ -33,7 +33,7 @@ API        := http://localhost:8080
 SEED_EMAIL := cliente@test.com
 SEED_PASS  := 123
 
-# Usuários criados pelo seed de dev (index.php -> seed_dev_data()).
+# Usuários criados pelo seed de dev (src/Core/Migrations.php -> seed_dev_data()).
 SEED_USERS := cliente@test.com fotografo@test.com garcom@test.com dj@test.com
 
 .PHONY: up upd down logs ps restart setup reset-db rehealth sh health health-all seed token pay-test reset-rate help env-check
